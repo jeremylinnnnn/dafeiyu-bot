@@ -33,6 +33,9 @@ import BotCore
             let server = try QQControlServer(engine: engine)
             server.start()
             print("Windows / Linux 本机面板：凭证仅保存在内存，退出后需重新填写。")
+            // 云端：设置 DAFEIYU_ONEBOT_TOKEN_FILE / DAFEIYU_DEEPSEEK_KEY_FILE 时
+            // 从只读文件加载凭证并按运行意图恢复；未设置时什么都不做。
+            await CloudStartup.run(engine: engine)
             // Keep the engine and listener alive without blocking MainActor.
             defer { withExtendedLifetime(server) {} }
             while !Task.isCancelled { try await Task.sleep(nanoseconds: 60_000_000_000) }

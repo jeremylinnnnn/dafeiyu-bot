@@ -26,6 +26,6 @@ let package = Package(
         .target(name: "BotCore", dependencies: crypto),
         .executableTarget(name: "WeChatAIBot", dependencies: [.target(name: "BotCore")] + crypto + transport, exclude: desktopFiles),
         .testTarget(name: "BotCoreTests", dependencies: ["BotCore"]),
-        .testTarget(name: "QQEngineTests", dependencies: ["WeChatAIBot"], exclude: ["onebot_fixture.py", "synthetic-images.json"])
+        .testTarget(name: "QQEngineTests", dependencies: ["WeChatAIBot"], exclude: ["onebot_fixture.py", "onebot_fixture_delayed.py", "synthetic-images.json"])
     ]
 )

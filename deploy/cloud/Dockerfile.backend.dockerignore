@@ -1,0 +1,22 @@
+# Dockerfile 专用的忽略规则。
+# 命名规则：<Dockerfile 相对路径>.dockerignore，放在 Dockerfile 旁边。
+# 构建上下文是仓库根目录（docker build -f deploy/cloud/Dockerfile.backend .），
+# 所以不能用 deploy/cloud/.dockerignore —— 那个位置不会被读取。
+
+dist
+.git
+.github
+docs
+deploy/qq-lima.yaml
+scripts/__pycache__
+Tests/__pycache__
+**/.DS_Store
+**/.build
+# 工具链缓存与本地工作记录，不属于构建输入
+.workbuddy-ai
+.build-verify
+# 凭证绝不允许进入构建上下文，更不允许进镜像
+secrets
+**/secrets
+*.token
+*.key

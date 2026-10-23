@@ -1,0 +1,52 @@
+name: Backend container (amd64)
+
+# 在原生 amd64 runner 构建并验证最终部署镜像，避免本机跨架构模拟的开销。
+on:
+  push:
+    paths:
+      - 'deploy/cloud/**'
+      - 'scripts/verify-cloud-container.py'
+      - 'scripts/onebot-e2e-fixture.py'
+      - 'Sources/**'
+      - 'Package.swift'
+      - 'Tests/**'
+      - '.github/workflows/docker-image.yml'
+  pull_request:
+    paths:
+      - 'deploy/cloud/**'
+      - 'scripts/verify-cloud-container.py'
+      - 'scripts/onebot-e2e-fixture.py'
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'Package.swift'
+      - '.github/workflows/docker-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  amd64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm the runner really is amd64
+        run: |
+          uname -m
+          test "$(uname -m)" = "x86_64"
+
+      - name: Build the deployment image
+        run: docker build --platform linux/amd64 -f deploy/cloud/Dockerfile.backend -t dafeiyu-backend:test .
+
+      - name: Image really is linux/amd64
+        run: docker image inspect dafeiyu-backend:test --format '{{.Os}}/{{.Architecture}}' | tee /tmp/platform
+      - run: test "$(cat /tmp/platform)" = "linux/amd64"
+
+      - name: Container end-to-end (synthetic OneBot, no real QQ)
+        run: python3 scripts/verify-cloud-container.py --image dafeiyu-backend:test --workdir /tmp/dafeiyu-e2e
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs dafeiyu-e2e 2>&1 | tail -60 || true

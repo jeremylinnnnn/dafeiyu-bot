@@ -43,6 +43,18 @@ struct QQRuntimeCredentials: Decodable {
     let oneBotToken: String
     let deepSeekKey: String
 }
+/// 断线原因分类。决定是否允许自动恢复，以及是否需要人工介入。
+enum QQDisconnectKind {
+    /// 用户主动操作或生命周期切换，不自动重连。
+    case intentional
+    /// 网络类故障：心跳超时、连接中断、连接检查失败。可有限次重连。
+    case network
+    /// 凭证或账号类故障：登录失效、账号不一致。必须停下等人处理，重连只会重复失败。
+    case credentials
+    /// 存储故障：状态写盘失败。自动恢复无意义。
+    case storage
+}
+
 @MainActor final class QQEngine: ObservableObject {
     @Published var config = QQConfig()
     @Published private(set) var connected = false
@@ -80,6 +92,29 @@ struct QQRuntimeCredentials: Decodable {
     private var worker: Task<Void, Never>?
     private var watchdog: Task<Void, Never>?
     private var deadlineTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
+    private var reconnectAttempts = 0
+    private let maxReconnectAttempts = 5
+    /// 用户是否显式授权运行。与 `running` 的区别：断线时 `running` 归零，但意图保留。
+    private var runRequested = false
+    /// 被动暂停（断线/超时）时暂存运行截止时间。`pause()` 会清 `runDeadline`，
+    /// 但重连后必须按原时限恢复，不能变成无限期运行。
+    private var preservedDeadline: Date?
+    /// 运行意图代次。任何改变"用户是否授权运行"的操作都 +1。
+    /// 异步流程（重连、冷启动恢复）在 `await` 前后比对代次，避免把用户中途的暂停又覆盖回去。
+    private var intentGeneration = 0
+    /// 异步流程用来做"await 前后有没有被人动过"的比对。
+    var runIntentGeneration: Int { intentGeneration }
+    /// 被动暂停暂存的截止时间。只读暴露，便于测试与诊断；外部改不了。
+    var pendingDeadline: Date? { preservedDeadline }
+    /// 云端自动恢复用。只有用户主动开始/暂停时触发，`disconnect()` 内部暂停不触发。
+    var onRunIntentChange: (@MainActor () -> Void)?
+    /// 云端自动恢复用。为 true 时网络类断线会有限次重连。
+    var autoReconnectEnabled = false
+    /// 运行意图快照。外部据此决定重启后是否恢复，不必访问私有字段。
+    var currentRunIntent: (enabled: Bool, singleReply: Bool, deadline: Date?) {
+        (runRequested, singleReply, runDeadline)
+    }
     private var session: UUID?
     private var started: Double = 0
     private var lastHeartbeat = Date()
@@ -206,7 +241,7 @@ struct QQRuntimeCredentials: Decodable {
         connection.event = { [weak self] in self?.receive($0) }
         connection.disconnected = { [weak self] error in
             self?.error = error.localizedDescription
-            self?.disconnect(reason: "QQ 连接中断；请手动检查并重新连接")
+            self?.disconnect(reason: "QQ 连接中断，准备重连", kind: .network)
         }
         #if canImport(AppKit)
         for name in [NSWorkspace.willSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
@@ -342,6 +377,9 @@ struct QQRuntimeCredentials: Decodable {
         return true
     }
     func clearTemporaryCredentials() {
+        // 清凭证等于放弃自动恢复：先撤掉意图，再断线，避免重连任务又把它拉起来。
+        runRequested = false; onRunIntentChange?()
+        reconnectTask?.cancel(); reconnectTask = nil; reconnectAttempts = 0
         disconnect(reason: "临时凭证已清除，QQ 已断开")
         runtimeCredentials = nil
         googleVisionKey = ""
@@ -401,26 +439,33 @@ struct QQRuntimeCredentials: Decodable {
         guard !busy, !runtimeBusy, !connected, storageOK else { return }
         busy = true; error = nil; let current = UUID(); session = current
         defer { if session == current { busy = false } }
+        // 连接失败必须按原因分类：账号/配置/存储问题重试只会重复失败，
+        // 只有真正的网络故障才允许进入有限重连。
+        var failure: QQDisconnectKind = .network
         do {
-            guard let file else { throw AppFailure.message("QQ 状态目录不可用") }
+            guard let file else { failure = .storage; throw AppFailure.message("QQ 状态目录不可用") }
             let lock = open(file.deletingLastPathComponent().appendingPathComponent("qq-engine.lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
-            guard lock >= 0 else { throw AppFailure.message("无法创建 QQ 运行锁") }
+            guard lock >= 0 else { failure = .storage; throw AppFailure.message("无法创建 QQ 运行锁") }
             guard flock(lock, LOCK_EX | LOCK_NB) == 0 else {
-                close(lock); throw AppFailure.message("另一个 QQ 回复引擎正在运行，请先停止它")
+                close(lock); failure = .storage; throw AppFailure.message("另一个 QQ 回复引擎正在运行，请先停止它")
             }
             runtimeLock = lock
-            try config.validate(); try persist()
+            do { try config.validate(); try persist() } catch { failure = .credentials; throw error }
             let token = try runtimeCredentials?.oneBotToken ?? Keychain.load(account: "qq-onebot-token", allowAuthenticationUI: allowAuthenticationUI)
             try await connection.connect(endpoint: config.endpoint, token: token)
             let response = try await connection.action("get_login_info")
             guard session == current else { return }
             guard let data = response["data"] as? [String: Any], QQPolicy.identifier(data["user_id"]) == config.expectedSelfID else {
+                failure = .credentials
                 throw AppFailure.message("实际登录 QQ 与配置不一致，已停止连接")
             }
             let health = try await connection.action("get_status")
             guard session == current else { return }
             guard let healthData = health["data"] as? [String: Any], healthData["online"] as? Bool == true,
-                  healthData["good"] as? Bool == true else { throw AppFailure.message("QQ 未在线或服务状态异常") }
+                  healthData["good"] as? Bool == true else {
+                failure = .credentials
+                throw AppFailure.message("QQ 未在线或服务状态异常")
+            }
             let friends = try await connection.action("get_friend_list")
             let groups = try await connection.action("get_group_list")
             guard session == current else { return }
@@ -436,14 +481,14 @@ struct QQRuntimeCredentials: Decodable {
                 while !Task.isCancelled {
                     do { try await Task.sleep(nanoseconds: 10_000_000_000) } catch { return }
                     guard let self, self.session == current else { return }
-                    if Date().timeIntervalSince(self.lastHeartbeat) > 75 { self.disconnect(reason: "QQ 心跳超时，已停止托管"); return }
+                    if Date().timeIntervalSince(self.lastHeartbeat) > 75 { self.disconnect(reason: "QQ 心跳超时", kind: .network); return }
                     self.scheduleArtworks()
                     self.scheduleMemoryLearning()
                 }
             }
         } catch {
             guard session == current else { return }
-            self.error = error.localizedDescription; disconnect(reason: "QQ 连接检查失败")
+            self.error = error.localizedDescription; disconnect(reason: "QQ 连接检查失败", kind: failure)
         }
     }
     func start(singleReply: Bool = false, duration: TimeInterval? = nil) {
@@ -477,9 +522,14 @@ struct QQRuntimeCredentials: Decodable {
             try keepAwake.run(); sleepPrevention = keepAwake
             #endif
             fence.start(); running = true; started = Date().timeIntervalSince1970
+            // 记录"用户授权运行"这个意图，与 running 分开：断线时 running 会归零，意图要留住。
+            runRequested = true; reconnectAttempts = 0
+            // 本次 start 已经接管时限，之前暂存的截止时间作废（否则无限期启动会沿用旧时限）。
+            preservedDeadline = nil
+            runDeadline = duration.map { Date().addingTimeInterval($0) }
+            intentGeneration &+= 1
             if let duration {
                 let epoch = fence.epoch
-                runDeadline = Date().addingTimeInterval(duration)
                 deadlineTask = Task { [weak self] in
                     do { try await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000)) } catch { return }
                     guard let self, self.fence.permits(epoch) else { return }
@@ -488,11 +538,23 @@ struct QQRuntimeCredentials: Decodable {
             }
             scheduleMemoryLearning()
             status = config.effectiveGroupParticipationEnabled ? "QQ 自动回复中 · 群真实 @ 或每 \(config.effectiveGroupParticipationEvery) 条主动接话" : "QQ 自动回复中 · 群聊仅响应真实 @"; error = nil
+            // 放在最后：此时 runDeadline 已就位，快照才是完整的。
+            onRunIntentChange?()
         } catch { self.error = error.localizedDescription }
     }
-    func pause() {
+    /// - Parameter recordIntent: 只有用户主动暂停才传 true。断线、超时、清理凭证
+    ///   这类被动暂停必须传 false，否则会把"用户授权运行"覆盖成"用户要求停止"，
+    ///   自动恢复就永远起不来。
+    func pause(recordIntent: Bool = true) {
         if let sleepPrevention, sleepPrevention.isRunning { sleepPrevention.terminate() }
         sleepPrevention = nil
+        // 被动暂停要把"还剩多久"存下来。但 `runDeadline` 已经被上一次暂停清空过，
+        // 第二次断线时它是 nil —— 不能拿 nil 覆盖先前存好的截止时间，否则重连后变成无限期运行。
+        if recordIntent {
+            preservedDeadline = nil
+        } else if let deadline = runDeadline {
+            preservedDeadline = deadline
+        }
         deadlineTask?.cancel(); deadlineTask = nil; runDeadline = nil
         fence.stop(); running = false; queue.removeAll(); worker?.cancel(); worker = nil
         memoryWorker?.cancel(); memoryWorker = nil
@@ -500,15 +562,87 @@ struct QQRuntimeCredentials: Decodable {
         repliesSinceSticker.removeAll()
         groupMessageCounts.removeAll(); groupRecentMessages.removeAll(); groupRecentInputs.removeAll()
         heldOwnerEvents.removeAll()
+        // 只有"用户撤销授权"才算一次意图变更。被动暂停（断线/超时）不改意图，
+        // 若也递增代次，冷启动连接失败时会被自己的恢复流程误判成"用户改主意"。
+        if recordIntent {
+            runRequested = false
+            intentGeneration &+= 1
+            onRunIntentChange?()
+        }
     }
-    func disconnect(reason: String = "QQ 已断开") {
-        pause(); session = nil; busy = false; connected = false; contacts = []
+    func disconnect(reason: String = "QQ 已断开", kind: QQDisconnectKind = .intentional) {
+        // 只有"人要求停止"才撤销授权。网络/凭证/存储故障是被动断开，意图要留住，
+        // 否则自动恢复永远起不来；反过来，主动断开必须撤销，否则云端重启后
+        // 会把用户已经关掉的回复又拉起来。
+        let recordIntent = (kind == .intentional)
+        pause(recordIntent: recordIntent); session = nil; busy = false; connected = false; contacts = []
         #if os(macOS)
         loginCode = nil
         #endif
         watchdog?.cancel(); watchdog = nil; connection.close(); status = reason
         // Release ownership even if a spawned process still holds a descriptor copy.
         if runtimeLock >= 0 { _ = flock(runtimeLock, LOCK_UN); close(runtimeLock); runtimeLock = -1 }
+        if kind == .network {
+            scheduleReconnect()
+        } else {
+            reconnectTask?.cancel(); reconnectTask = nil; reconnectAttempts = 0
+        }
+    }
+    /// 冷启动恢复：在首次连接之前先把"已授权运行"装回引擎。
+    ///
+    /// 不这样做的话 `runRequested` 一直是 false，首次连接失败时 `scheduleReconnect()`
+    /// 会被直接拒掉——服务器上 NapCat 比后端慢几十秒启动，后端就永远等人来点。
+    func restoreRunIntent(singleReply: Bool, deadline: Date?) {
+        guard !connected, !running else { return }
+        self.singleReply = singleReply
+        runRequested = true
+        preservedDeadline = deadline
+        reconnectAttempts = 0
+        intentGeneration &+= 1
+    }
+    /// 云端把运行意图写盘失败时由回调回写。
+    ///
+    /// 不能只 print：面板上"已暂停"看起来是成功的，但磁盘上可能还留着 `enabled=true`，
+    /// 重启后会自己跑起来。必须让看面板的人知道"这一步没保住"。
+    func reportRunIntentPersistenceFailure(_ message: String) {
+        error = message
+        status = message
+    }
+    /// 有限次指数退避重连。只恢复"已授权运行"这个状态，**不重放断线前的队列**：
+    /// 断线时队列已被 `pause()` 清空，重连后只处理新到达的消息。
+    /// 断线前的生成任务、过期消息、发送结果未知的任务一律不恢复。
+    private func scheduleReconnect() {
+        guard autoReconnectEnabled, runRequested, reconnectTask == nil else { return }
+        guard reconnectAttempts < maxReconnectAttempts else {
+            status = "网络重连已达上限（\(maxReconnectAttempts) 次），请手动检查后重新开始"
+            runRequested = false; intentGeneration &+= 1; onRunIntentChange?()
+            return
+        }
+        reconnectAttempts += 1
+        let delay = min(pow(2, Double(reconnectAttempts - 1)) * 5, 60)
+        status = "网络中断，\(Int(delay)) 秒后重连（第 \(reconnectAttempts)/\(maxReconnectAttempts) 次）"
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard let self else { return }
+            self.reconnectTask = nil
+            guard self.autoReconnectEnabled, self.runRequested, !self.connected else { return }
+            // `connect()` 是异步的：等待期间用户可能暂停，也可能重新开始。
+            // 记下代次，返回后必须还是同一代，否则放弃本次恢复——绝不覆盖用户的操作。
+            let generation = self.intentGeneration
+            await self.connect()
+            guard self.intentGeneration == generation, self.runRequested, self.connected else { return }
+            self.reconnectAttempts = 0
+            if let deadline = self.preservedDeadline, deadline.timeIntervalSinceNow <= 0 {
+                // 运行时限已过：不恢复，并把意图落成"停止"，避免下次启动又试一遍。
+                self.status = "运行时限已到，未恢复自动回复"
+                self.preservedDeadline = nil
+                self.runRequested = false; self.onRunIntentChange?()
+                return
+            }
+            // 按原截止时间的剩余量恢复，不是重新计时。
+            self.start(singleReply: self.singleReply,
+                       duration: self.preservedDeadline.map { $0.timeIntervalSinceNow })
+        }
     }
     func takeOver(_ id: UUID) {
         // Cancel the active generation as well, preventing a response from escaping a removed scope.
@@ -533,17 +667,17 @@ struct QQRuntimeCredentials: Decodable {
     }
     private func receive(_ object: [String: Any]) {
         if object["post_type"] as? String == "meta_event" {
-            guard QQPolicy.identifier(object["self_id"]) == config.expectedSelfID else { disconnect(reason: "QQ 账号发生变化，已停止"); return }
+            guard QQPolicy.identifier(object["self_id"]) == config.expectedSelfID else { disconnect(reason: "QQ 账号发生变化，已停止", kind: .credentials); return }
             if object["meta_event_type"] as? String == "heartbeat" {
                 guard let s = object["status"] as? [String: Any], s["online"] as? Bool == true, s["good"] as? Bool == true else {
-                    disconnect(reason: "QQ 离线或服务异常，已停止"); return
+                    disconnect(reason: "QQ 离线或服务异常，已停止", kind: .credentials); return
                 }
                 lastHeartbeat = Date()
             }
             return
         }
         guard running else { return }
-        if let account = QQPolicy.identifier(object["self_id"]), account != config.expectedSelfID { disconnect(reason: "QQ 事件账号不一致，已停止"); return }
+        if let account = QQPolicy.identifier(object["self_id"]), account != config.expectedSelfID { disconnect(reason: "QQ 事件账号不一致，已停止", kind: .credentials); return }
         let now = Date().timeIntervalSince1970
         guard ["message", "message_sent"].contains(object["post_type"] as? String ?? ""), QQPolicy.identifier(object["self_id"]) == config.expectedSelfID,
               let target = config.targets.first(where: {
@@ -1267,7 +1401,7 @@ struct QQRuntimeCredentials: Decodable {
             persistedData = data
         } catch {
             storageOK = false; self.error = "QQ 状态保存失败：\(error.localizedDescription)"
-            disconnect(reason: "QQ 状态保存失败，已停止"); throw error
+            disconnect(reason: "QQ 状态保存失败，已停止", kind: .storage); throw error
         }
     }
 }
