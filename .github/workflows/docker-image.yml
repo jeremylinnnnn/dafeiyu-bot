@@ -11,6 +11,7 @@ on:
       - 'deploy/qq-container-entrypoint.sh'
       - 'scripts/verify-cloud-container.py'
       - 'scripts/verify-deploy-package.py'
+      - 'scripts/test-cloud-ops.py'
       - 'scripts/onebot-e2e-fixture.py'
       - 'scripts/init-qq-config.py'
       - 'Sources/**'
@@ -23,6 +24,7 @@ on:
       - 'deploy/qq-container-entrypoint.sh'
       - 'scripts/verify-cloud-container.py'
       - 'scripts/verify-deploy-package.py'
+      - 'scripts/test-cloud-ops.py'
       - 'scripts/onebot-e2e-fixture.py'
       - 'scripts/init-qq-config.py'
       - 'Sources/**'
@@ -40,6 +42,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+
+      - name: Ops failure and service-state regressions
+        run: python3 scripts/test-cloud-ops.py
 
       - name: Confirm the runner really is amd64
         run: |
@@ -82,10 +87,23 @@ jobs:
           docker load -i /tmp/dafeiyu-deploy-pkg/backend-image.tar.gz
           docker image inspect "$SHORT_TAG" --format '{{.Os}}/{{.Architecture}}'
 
+      - name: Archive and unpack the actual delivery format
+        run: |
+          cd /tmp
+          tar -cf "dafeiyu-deploy-${{ github.sha }}.tar" -C dafeiyu-deploy-pkg .
+          sha256sum "dafeiyu-deploy-${{ github.sha }}.tar" > "dafeiyu-deploy-${{ github.sha }}.tar.sha256"
+          mkdir dafeiyu-delivery-roundtrip
+          tar -xf "dafeiyu-deploy-${{ github.sha }}.tar" -C dafeiyu-delivery-roundtrip
+          test -x dafeiyu-delivery-roundtrip/ops/init-check.sh
+
       - name: Package-level rehearsal (load, upgrade keeps data, pause survives, rollback)
+        env:
+          # A host may already use Compose for another project. The rehearsal
+          # must ignore it before the first compose up, including without sudo.
+          COMPOSE_PROJECT_NAME: production-synthetic
         run: |
           python3 scripts/verify-deploy-package.py \
-            --package /tmp/dafeiyu-deploy-pkg \
+            --package /tmp/dafeiyu-delivery-roundtrip \
             --upgrade-package /tmp/dafeiyu-deploy-pkg-next \
             --workdir /tmp/dafeiyu-pkg-e2e
 
@@ -94,7 +112,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dafeiyu-deploy-${{ github.sha }}
-          path: /tmp/dafeiyu-deploy-pkg
+          # Wrapping in tar preserves executable bits that artifact ZIPs drop.
+          path: |
+            /tmp/dafeiyu-deploy-${{ github.sha }}.tar
+            /tmp/dafeiyu-deploy-${{ github.sha }}.tar.sha256
+          compression-level: 0
           retention-days: 7
           if-no-files-found: error
 

@@ -26,19 +26,36 @@ done
 [[ $LABEL =~ ^[A-Za-z0-9._-]+$ ]] || fail "label 只允许字母数字._-"
 IMG="dafeiyu-backend:$(current_backend_tag)"
 TS=$(date -u +%Y%m%dT%H%M%SZ)
-DEST="backups/$LABEL-$TS"
-mkdir -p "$DEST"
+mkdir -p backups
+chmod 700 backups
+DEST=$(mktemp -d "backups/$LABEL-$TS-XXXXXX")
 chmod 700 "$DEST"
 
-STACK_RUNNING=0
-compose ps --status running -q 2>/dev/null | grep -q . && STACK_RUNNING=1
+RUNNING_SERVICES=()
+RUNNING_LIST=$(compose ps --status running --services)
+while IFS= read -r service; do
+    [[ -n $service ]] && RUNNING_SERVICES+=("$service")
+done <<< "$RUNNING_LIST"
+STACK_RUNNING=${#RUNNING_SERVICES[@]}
+
+restore_services() {
+    local result=$?
+    trap - EXIT
+    if (( STOP && STACK_RUNNING )); then
+        # 只恢复备份前正在运行的服务，不能复活人工停止的后端。
+        if ! compose start "${RUNNING_SERVICES[@]}"; then
+            warn "备份后的服务恢复失败，请检查容器状态"
+            (( result != 0 )) || result=1
+        fi
+    fi
+    exit "$result"
+}
+trap restore_services EXIT
 
 if (( STOP )); then
     echo "== 停止整个栈以备份 QQ 登录卷 =="
     compose stop
 fi
-# 只在备份前栈本来就在运行时才恢复启动
-trap '(( STOP && STACK_RUNNING )) && compose start >/dev/null 2>&1 || true' EXIT
 
 echo "== 备份 data/ =="
 img_tar "$PWD/$DEST" "$PWD/data" data.tar.gz

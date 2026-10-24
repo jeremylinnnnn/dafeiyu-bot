@@ -26,10 +26,10 @@ else
 fi
 
 echo "== 回滚前留底（数据 + 当前 compose） =="
+compose stop backend
 bash ops/backup.sh --data-only --label pre-rollback
-cp docker-compose.yml "backups/pre-rollback-$(date -u +%Y%m%dT%H%M%SZ)-compose.yml" 2>/dev/null || true
 
-echo "== 停后端，恢复 $BACKUP_DIR 的 compose（标签 $CUR_TAG → $OLD_TAG） =="
+echo "== 停后端，恢复 $BACKUP_DIR 的 compose（标签 ${CUR_TAG} → ${OLD_TAG}） =="
 compose stop backend
 cp "$BACKUP_DIR/docker-compose.yml" docker-compose.yml
 compose up -d --no-deps --force-recreate backend

@@ -26,13 +26,17 @@ rollback）、`VERSION.txt` 清单与 `SHA256SUMS`。交付标签为 `dafeiyu-ba
 compose 内标签与镜像严格一致；包内不含任何真实凭证、账号或会话数据。
 
 - CI（`.github/workflows/docker-image.yml`）：amd64 构建 + 19 项容器验收 + 包级演练
-  通过后，导出 artifact `dafeiyu-deploy-<commit>`，保留 7 天。
+  通过后，导出 artifact `dafeiyu-deploy-<commit>`，保留 7 天。artifact 中是完整
+  部署目录的 `.tar` 与外层 `.tar.sha256`；先校验外层再解包。使用 tar 保留运维
+  脚本执行权限，CI 对归档后重新解包的目录运行演练。
 - 包级合成演练：`python3 scripts/verify-deploy-package.py --package <包目录>
   [--upgrade-package <第二个标签的包>] --workdir <独立目录>`。覆盖静态校验、docker load、
   升级保留 data/、暂停不被升级覆盖、回滚可恢复。全程合成身份，NapCat 不参与。
 - 服务器端从解包目录运行 `ops/` 下的入口；步骤见包内 `SERVER_README.md`。
   备份不含 `secrets/`（凭证单独处理）；升级只重建后端，NapCat 与登录卷不动；
   恢复清空登录卷前先把当前卷快照到 `backups/pre-restore-*`，解压失败可整卷重来。
+  `backup.sh --stop` 仅重启备份前正在运行的服务；同秒备份使用独立目录，不覆盖旧备份。
+  回滚先停后端再留存数据快照，避免热备份的不一致。
 - 本机演练用 `--platform linux/arm64` 产出的包只能做合成演练，不得对外交付。
 
 ## 数据与凭证

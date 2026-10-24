@@ -4,6 +4,16 @@
 
 ## 首次部署
 
+Actions 下载得到 `dafeiyu-deploy-<提交>.tar` 和对应 `.tar.sha256`。
+先在下载目录校验外层，再解包到新的部署目录。tar 保留脚本可执行权限：
+
+```bash
+sha256sum -c dafeiyu-deploy-*.tar.sha256
+mkdir dafeiyu-runtime
+tar -xf dafeiyu-deploy-<提交>.tar -C dafeiyu-runtime
+cd dafeiyu-runtime
+```
+
 ```bash
 # 1. 校验并加载镜像（确认 VERSION.txt 里 platform 与服务器架构一致）
 sha256sum -c SHA256SUMS
@@ -43,7 +53,7 @@ docker logs dafeiyu-backend 2>&1 | grep QQ_CONTROL_URL
 | 目的 | 命令 |
 | --- | --- |
 | 状态（容器 / QQ 连接 / 资源快照） | `ops/status.sh` |
-| 备份（含 QQ 登录卷，建议停服备份） | `ops/backup.sh --stop` |
+| 备份（含 QQ 登录卷，建议停服备份；仅恢复原本运行的服务） | `ops/backup.sh --stop` |
 | 只备配置与额度（升级前自动执行） | `ops/backup.sh --data-only` |
 | 恢复（先 `docker compose stop`；清空登录卷前自动快照原件到 `backups/pre-restore-*`） | `ops/restore.sh backups/<目录>`（相对/绝对路径均可） |
 | 升级（校验新包 → 备份 → 只重建后端） | `ops/upgrade.sh <新包目录>` |

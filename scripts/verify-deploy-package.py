@@ -37,7 +37,12 @@ failures = []
 
 
 def run(args, cwd=None, timeout=300, capture=True):
-    return subprocess.run(args, cwd=cwd, capture_output=capture, text=True, timeout=timeout)
+    # 普通 docker 会保留该变量，sudo docker 通常会删除它。两条路径必须
+    # 都以演练副本中的随机项目名为准，不能让宿主环境覆盖 name:。
+    environment = os.environ.copy()
+    environment.pop('COMPOSE_PROJECT_NAME', None)
+    return subprocess.run(args, cwd=cwd, capture_output=capture, text=True,
+                          timeout=timeout, env=environment)
 
 
 def docker(*args, **kwargs):
@@ -260,8 +265,10 @@ def main():
     compose_file = deploy / 'docker-compose.yml'
     replaced = re.sub(r'^name:[^\n]*$', f'name: {rehearsal_project}',
                       compose_file.read_text(), count=1, flags=re.M)
-    check('隔离项目名已写入演练 compose 副本',
-          f'name: {rehearsal_project}' in replaced and replaced != compose_file.read_text())
+    isolated = f'name: {rehearsal_project}' in replaced and replaced != compose_file.read_text()
+    check('隔离项目名已写入演练 compose 副本', isolated)
+    if not isolated:
+        raise SystemExit('无法写入独立项目名，拒绝启动演练容器')
     compose_file.write_text(replaced)
     print('（解包副本的 SHA256 已随静态校验覆盖源包；副本直接用于演练）')
 
@@ -296,6 +303,9 @@ def main():
     compose_args = ['compose', '-f', 'docker-compose.yml', '-f', 'docker-compose.credentials.yml']
     created_volume = None
     try:
+        effective = docker(*compose_args, 'config', '--format', 'json', cwd=deploy)
+        if effective.returncode != 0 or json.loads(effective.stdout)['name'] != rehearsal_project:
+            raise SystemExit('实际 Compose 项目名不属于本次演练，拒绝启动')
         result = docker(*compose_args, 'up', '-d', '--no-deps', 'backend', cwd=deploy)
         check('compose 起后端（--no-deps，不经 NapCat）', result.returncode == 0, result.stderr[-400:])
 
@@ -413,7 +423,9 @@ def main():
             check('同名卷属本次演练项目（隔离生效）', True)
         elif pre.returncode != 0:
             check('演练卷不存在，由本段显式创建', True)
-            docker('volume', 'create', '--label', 'org.dafeiyu.rehearsal=true', vol)
+            docker('volume', 'create', '--label', f'org.dafeiyu.rehearsal={rehearsal_project}',
+                   '--label', f'com.docker.compose.project={rehearsal_project}',
+                   '--label', 'com.docker.compose.volume=qq-ai-data', vol)
         else:
             check('演练卷名未与外部卷冲突', False, pre.stdout[:120])
             raise SystemExit('演练卷名与外部卷冲突，拒绝继续')
@@ -466,16 +478,21 @@ def main():
               and intent_state(deploy).get('enabled') is False)
     finally:
         docker(*compose_args, 'down', '--remove-orphans', cwd=deploy, timeout=120)
-        # 只清理以本次演练随机项目名为前缀的卷；前缀含随机后缀，不可能撞上生产卷
+        # 前缀与所有权标签必须同时匹配；不能只凭名字删除卷。
         rehearsal_volumes = [v for v in docker('volume', 'ls', '--format', '{{.Name}}').stdout.split()
                              if v.startswith(rehearsal_project + '_')]
         for v in rehearsal_volumes:
-            docker('volume', 'rm', '-f', v)
+            owner = docker('volume', 'inspect', '--format',
+                           '{{index .Labels "com.docker.compose.project"}}', v)
+            if owner.returncode == 0 and owner.stdout.strip() == rehearsal_project:
+                docker('volume', 'rm', v)
+            else:
+                print(f'警告：卷 {v} 所有权标签不匹配，未删除')
         if created_volume and created_volume not in rehearsal_volumes:
             mark = docker('volume', 'inspect', '--format',
                           '{{index .Labels "org.dafeiyu.rehearsal"}}', created_volume).stdout.strip()
-            if mark == 'true':
-                docker('volume', 'rm', '-f', created_volume)
+            if mark == rehearsal_project:
+                docker('volume', 'rm', created_volume)
             else:
                 print(f'警告：卷 {created_volume} 缺少演练标记，未自动删除，请人工确认')
         fixture.terminate()
