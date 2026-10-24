@@ -3,8 +3,9 @@
 """Create private bridge configs outside the repo; never overwrite or print tokens."""
 import argparse,json,os,pathlib,secrets
 p=argparse.ArgumentParser();p.add_argument('--directory',type=pathlib.Path,default=pathlib.Path.home()/'.local/qq-runtime/config');args=p.parse_args()
-directory=args.directory.expanduser().resolve();repo=pathlib.Path(__file__).resolve().parents[1]
-if directory==repo or repo in directory.parents: p.error('Store runtime credentials outside the repository.')
+directory=args.directory.expanduser().resolve();repo=next((a for a in pathlib.Path(__file__).resolve().parents if (a/'.git').exists()),None)
+# 只在源码仓库内拒绝；部署包/服务器上没有 .git，写包内 config/ 是正常用法。
+if repo and (directory==repo or repo in directory.parents): p.error('Store runtime credentials outside the repository.')
 names=['onebot11.json','webui.json','napcat.json']
 if any((directory/n).exists() for n in names):p.error('Configuration exists; refusing to overwrite.')
 directory.mkdir(parents=True,exist_ok=True);os.chmod(directory,0o700)

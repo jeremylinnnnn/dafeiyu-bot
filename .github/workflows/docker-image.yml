@@ -1,12 +1,18 @@
 name: Backend container (amd64)
 
 # 在原生 amd64 runner 构建并验证最终部署镜像，避免本机跨架构模拟的开销。
+# 构建标签随提交变化（dafeiyu-backend:<短SHA>）；19 项容器验收通过后
+# 组装版本化部署包（镜像压缩包 + 匹配标签的 Compose + 运维入口 + 清单），
+# 再用同一提交的第二个标签做升级/回滚合成演练，最后导出 artifact 供下载。
 on:
   push:
     paths:
       - 'deploy/cloud/**'
+      - 'deploy/qq-container-entrypoint.sh'
       - 'scripts/verify-cloud-container.py'
+      - 'scripts/verify-deploy-package.py'
       - 'scripts/onebot-e2e-fixture.py'
+      - 'scripts/init-qq-config.py'
       - 'Sources/**'
       - 'Package.swift'
       - 'Tests/**'
@@ -14,8 +20,11 @@ on:
   pull_request:
     paths:
       - 'deploy/cloud/**'
+      - 'deploy/qq-container-entrypoint.sh'
       - 'scripts/verify-cloud-container.py'
+      - 'scripts/verify-deploy-package.py'
       - 'scripts/onebot-e2e-fixture.py'
+      - 'scripts/init-qq-config.py'
       - 'Sources/**'
       - 'Tests/**'
       - 'Package.swift'
@@ -28,7 +37,7 @@ permissions:
 jobs:
   amd64:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -38,14 +47,55 @@ jobs:
           test "$(uname -m)" = "x86_64"
 
       - name: Build the deployment image
-        run: docker build --platform linux/amd64 -f deploy/cloud/Dockerfile.backend -t dafeiyu-backend:test .
+        run: |
+          SHORT_TAG="dafeiyu-backend:$(echo "${{ github.sha }}" | cut -c1-7)"
+          echo "SHORT_TAG=$SHORT_TAG" >> "$GITHUB_ENV"
+          docker build --platform linux/amd64 -f deploy/cloud/Dockerfile.backend -t "$SHORT_TAG" .
 
       - name: Image really is linux/amd64
-        run: docker image inspect dafeiyu-backend:test --format '{{.Os}}/{{.Architecture}}' | tee /tmp/platform
-      - run: test "$(cat /tmp/platform)" = "linux/amd64"
+        run: |
+          docker image inspect "$SHORT_TAG" --format '{{.Os}}/{{.Architecture}}' | tee /tmp/platform
+          test "$(cat /tmp/platform)" = "linux/amd64"
 
       - name: Container end-to-end (synthetic OneBot, no real QQ)
-        run: python3 scripts/verify-cloud-container.py --image dafeiyu-backend:test --workdir /tmp/dafeiyu-e2e
+        run: python3 scripts/verify-cloud-container.py --image "$SHORT_TAG" --workdir /tmp/dafeiyu-e2e
+
+      - name: Package the versioned deployment bundle
+        run: |
+          deploy/cloud/package.sh \
+            --image "$SHORT_TAG" \
+            --out /tmp/dafeiyu-deploy-pkg \
+            --platform linux/amd64 \
+            --commit "${{ github.sha }}" \
+            --ci-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          # 同一镜像打第二个标签作为演练用「新版本」，标签必须与主包不同
+          docker tag "$SHORT_TAG" dafeiyu-backend:rehearse-next
+          deploy/cloud/package.sh \
+            --image dafeiyu-backend:rehearse-next \
+            --out /tmp/dafeiyu-deploy-pkg-next \
+            --platform linux/amd64 \
+            --commit "${{ github.sha }}"
+
+      - name: Prove the delivered tar really loads
+        run: |
+          docker rmi "$SHORT_TAG"
+          docker load -i /tmp/dafeiyu-deploy-pkg/backend-image.tar.gz
+          docker image inspect "$SHORT_TAG" --format '{{.Os}}/{{.Architecture}}'
+
+      - name: Package-level rehearsal (load, upgrade keeps data, pause survives, rollback)
+        run: python3 scripts/verify-deploy-package.py \
+          --package /tmp/dafeiyu-deploy-pkg \
+          --upgrade-package /tmp/dafeiyu-deploy-pkg-next \
+          --workdir /tmp/dafeiyu-pkg-e2e
+
+      - name: Upload the deployment bundle (7-day retention)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dafeiyu-deploy-${{ github.sha }}
+          path: /tmp/dafeiyu-deploy-pkg
+          retention-days: 7
+          if-no-files-found: error
 
       - name: Container logs on failure
         if: failure()

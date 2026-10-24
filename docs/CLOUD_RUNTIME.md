@@ -17,6 +17,24 @@ docker image inspect dafeiyu-backend:0.1.0 --format '{{.Os}}/{{.Architecture}}'
 `linux/arm64`。跨架构模拟也是可选方式；GitHub Actions 使用原生 amd64 runner
 构建并运行合成容器验证，避免模拟编译的额外开销。
 
+## 部署包交付
+
+版本化部署包由 `deploy/cloud/package.sh` 组装：镜像压缩包 + 标签固化的 Compose +
+`docker-compose.credentials.yml`、`qq-container-entrypoint.sh`、`init-qq-config.py`、
+`SERVER_README.md`、`ops/` 运维入口（init-check / status / backup / restore / upgrade /
+rollback）、`VERSION.txt` 清单与 `SHA256SUMS`。交付标签为 `dafeiyu-backend:<短提交>`，
+compose 内标签与镜像严格一致；包内不含任何真实凭证、账号或会话数据。
+
+- CI（`.github/workflows/docker-image.yml`）：amd64 构建 + 19 项容器验收 + 包级演练
+  通过后，导出 artifact `dafeiyu-deploy-<commit>`，保留 7 天。
+- 包级合成演练：`python3 scripts/verify-deploy-package.py --package <包目录>
+  [--upgrade-package <第二个标签的包>] --workdir <独立目录>`。覆盖静态校验、docker load、
+  升级保留 data/、暂停不被升级覆盖、回滚可恢复。全程合成身份，NapCat 不参与。
+- 服务器端从解包目录运行 `ops/` 下的入口；步骤见包内 `SERVER_README.md`。
+  备份不含 `secrets/`（凭证单独处理）；升级只重建后端，NapCat 与登录卷不动；
+  恢复清空登录卷前先把当前卷快照到 `backups/pre-restore-*`，解压失败可整卷重来。
+- 本机演练用 `--platform linux/arm64` 产出的包只能做合成演练，不得对外交付。
+
 ## 数据与凭证
 
 部署目录包含 Compose 文件、QQ entrypoint 脚本、私人 NapCat 配置目录及持久数据：
