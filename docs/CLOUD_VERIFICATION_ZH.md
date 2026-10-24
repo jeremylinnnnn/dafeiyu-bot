@@ -1,6 +1,6 @@
 # 云端运行验证记录
 
-日期：2026-10-23。验证的代码提交：`a7a4fb3775901f63d1110a44f0ef7ff5aed3823f`。
+更新日期：2026-10-24。最新交付代码：`062b0a576787bcce3ec8b67849c1fc232e5c0058`。原始引擎验证基线：`a7a4fb3775901f63d1110a44f0ef7ff5aed3823f`。
 部署与维护说明见 [CLOUD_RUNTIME.md](CLOUD_RUNTIME.md)。
 
 ## 全量失败的原因
@@ -41,7 +41,7 @@ ARM64 最终发布镜像 `dafeiyu-backend:verified-a7a4fb3` 构建通过，架�
 - [原生 amd64 Linux 全量及发布/传输验证](https://github.com/jeremylinnnnn/dafeiyu-bot/actions/runs/39933231954)：通过（完整测试、Linux 图片边界、release 构建、HTTP 控制面板和合成 WebSocket 传输）。
 - [macOS CI](https://github.com/jeremylinnnnn/dafeiyu-bot/actions/runs/39933231967)：通过。
 
-## 部署包交付验收（2026-10-24，正式交付版本 `912c389`）
+## 历史部署包验收（2026-10-24，`912c389`，已被后续修复替代）
 
 提交 `912c389` 的 [amd64 工作流](https://github.com/jeremylinnnnn/dafeiyu-bot/actions/runs/40066223287) 全绿：构建、平台确认、19 项容器验收、版本化打包、tar load 证明、包级演练（加载、升级保留 data/、暂停不被覆盖、回滚、恢复含登录卷快照）。本机 lima（arm64 演练包）同一脚本 A–F 全部通过，含资源隔离与权限断言。
 
@@ -58,6 +58,32 @@ ARM64 最终发布镜像 `dafeiyu-backend:verified-a7a4fb3` 构建通过，架�
 - **备份权限**：备份目录 0700、含 QQ 登录数据的 tar 一律 0600（快照以 `umask 077` 创建，无 0644 窗口），演练中逐项断言。
 
 边界：以上全部为合成验证，不调用真实模型、不发送真实 QQ 消息；服务器上的真实部署与 T1–T4 尚未开始。
+
+## 最新部署包与运维回归验收（2026-10-24，`062b0a5`）
+
+[amd64 工作流 40068467766](https://github.com/jeremylinnnnn/dafeiyu-bot/actions/runs/40068467766) 实际成功：四项运维回归、原生镜像构建、19 项容器检查、打包、镜像加载、交付 tar 归档与解包、对解包副本执行 A–F、artifact 上传。另有 [Linux CI](https://github.com/jeremylinnnnn/dafeiyu-bot/actions/runs/40068467804) 与 [macOS CI](https://github.com/jeremylinnnnn/dafeiyu-bot/actions/runs/40068467765)，状态以各运行记录为准，不由镜像工作流代替。
+
+本轮没有修改 Swift 引擎，修复的是部署脚本的四个实证问题：
+
+- 停服备份只恢复原先正在运行的服务，不会启动先前人工停止的后端；服务恢复失败返回失败状态。
+- 回滚在读取备份数据前停止后端，避免把热备份当作一致快照。
+- 同一秒同一标签的备份使用独立随机目录，旧备份不被覆盖。
+- 演练子进程不继承宿主 COMPOSE_PROJECT_NAME；第一次启动前核对有效项目名，清卷同时核对随机前缀和项目标签。
+
+`python3 scripts/test-cloud-ops.py` 在 macOS 和 Linux 上四项通过。临时副本切回旧部署脚本后，四项均按预期断言失败（0 个测试错误），不修改工作树。真实 Linux ARM64 演练使用保留镜像重新打包，归档并解包后在故意设置外部项目名、DOCKER="sudo docker" 的环境下 A–F 全通过；清理后只剩原始 qq-ai-data 卷。测试不读取该原始卷内容。
+
+本机 `bash scripts/test.sh`：引擎 96 项（46.681 秒）与核心 74 项通过；`bash scripts/build.sh` 发布构建和签名检查通过。
+
+对 Actions **实际下载**的交付产物进行了以下验收：
+
+- artifact 内是 `.tar` 和 `.tar.sha256`，外层校验通过；tar 封装保留执行权限，避免 artifact ZIP 抹掉执行位。
+- 解包后的 `SHA256SUMS` 17 项全部通过，无清单外文件，三个骨架目录均存在。
+- `ops/` 下全部脚本及 QQ entrypoint 解包后有执行权限，不靠事后 chmod 修补。
+- 在 ARM64 VM 中实际 `docker load` 成功，镜像为 `dafeiyu-backend:062b0a5`，inspect 为 `linux/amd64`；只加载和检查，不在 ARM64 上运行该镜像。
+
+最后核对中，CI 清单的 image_id 为 OCI 配置摘要，VM 的 Docker inspect.Id 为 OCI manifest 摘要，两者不是同一层级。已校验归档中两份元数据的 SHA256，并确认加载镜像的 manifest.config.digest 等于清单记录的配置摘要，且配置平台为 linux/amd64；不是镜像内容不一致。跨 Docker 存储后端不要盲目比较不同层级的 ID。
+
+本轮限于合成验证；真实 QQ、模型、云端重启和 Mac 关机验收仍待服务器采购后执行。
 
 ## 验证边界
 
