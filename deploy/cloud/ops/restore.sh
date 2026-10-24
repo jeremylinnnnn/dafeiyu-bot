@@ -46,11 +46,17 @@ if [[ -f $BACKUP/qq-ai-data.tar.gz ]]; then
     fi
     # 清空不可逆，先把当前卷完整快照到 backups/：解压失败可整卷重来，
     # 误恢复也能从快照找回登录态。快照失败就拒绝继续。
-    echo "== 快照当前登录卷到 backups/pre-restore-$TS-qq-ai-data.tar.gz =="
-    "${DOCKER_CMD[@]}" run --rm -u 0 --entrypoint tar \
+    # 快照含 QQ 登录数据：目录 0700、文件 0600（umask 077 创建，不留 0644 窗口）。
+    mkdir -p backups
+    chmod 700 backups
+    echo "== 快照当前登录卷到 backups/pre-restore-$TS-qq-ai-data.tar.gz（0600） =="
+    "${DOCKER_CMD[@]}" run --rm -u 0 --entrypoint sh \
         -v "$VOL:/source:ro" -v "$PWD/backups:/target" \
-        "$IMG" czf "/target/pre-restore-$TS-qq-ai-data.tar.gz" -C /source .
+        "$IMG" -c "umask 077 && tar czf /target/pre-restore-$TS-qq-ai-data.tar.gz -C /source ."
     [[ -s "backups/pre-restore-$TS-qq-ai-data.tar.gz" ]] || fail "登录卷快照失败，拒绝清空卷"
+    "${DOCKER_CMD[@]}" run --rm -u 0 --entrypoint sh \
+        -v "$PWD/backups:/target" "$IMG" \
+        -c "chown $(id -u):$(id -g) /target/pre-restore-$TS-qq-ai-data.tar.gz && chmod 600 /target/pre-restore-$TS-qq-ai-data.tar.gz"
     echo "== 恢复 QQ 登录卷 $VOL（清空后解压；原件已快照） =="
     "${DOCKER_CMD[@]}" run --rm -u 0 --entrypoint sh \
         -v "$VOL:/dest" -v "$BACKUP:/backup:ro" \

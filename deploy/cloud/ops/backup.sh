@@ -87,5 +87,11 @@ cp docker-compose.yml "$DEST/docker-compose.yml"
 "${DOCKER_CMD[@]}" run --rm -u 0 --entrypoint chown -v "$PWD/$DEST:/t" "$IMG" \
     -R "$(id -u):$(id -g)" /t
 
+# 备份含 QQ 登录数据：目录 0700，tar 一律 0600
+chmod 700 "$DEST"
+for t in "$DEST"/*.tar.gz; do
+    [[ -e $t ]] && chmod 600 "$t"
+done
+
 echo "备份完成：$DEST"
 ls -lh "$DEST"

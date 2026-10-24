@@ -25,6 +25,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
+import re
 
 DOCKER = os.environ.get('DOCKER', 'docker').split()
 MARKER = '.dafeiyu-package-rehearsal'
@@ -196,6 +198,10 @@ def intent_state(deploy: pathlib.Path):
     return json.loads(text)
 
 
+def octal_mode(path):
+    return format(os.stat(path).st_mode & 0o777, 'o')
+
+
 def tree_hashes(root: pathlib.Path):
     """data/ 里的文件属主 10001、权限 0600，用 sudo cat 读取后哈希。"""
     hashes = {}
@@ -227,6 +233,12 @@ def main():
     if existing.stdout.strip():
         raise SystemExit(f'已存在名为 {BACKEND_CONTAINER} 的容器，拒绝演练；请先清理（可能是生产容器）')
 
+    # 演练用独立 Compose 项目名：compose 文件顶层的 name: dafeiyu 会解析出
+    # 固定卷名 dafeiyu_qq-ai-data——在登录卷仍保留的机器上，compose up 就会
+    # 采纳该卷，F 段更会写入甚至删除它。直接改写演练副本的 name:（文件级
+    # 改动，免疫 sudo 的环境清洗；环境变量 DOCKER="sudo docker" 时传不进 docker）。
+    rehearsal_project = f'dafeiyu-rehearsal-{uuid.uuid4().hex[:12]}'
+
     if root.exists() and any(root.iterdir()) and not (root / MARKER).is_file():
         raise SystemExit('拒绝清理未标记的目录；请指定新的独立 --workdir')
     shutil.rmtree(root, ignore_errors=True)
@@ -244,6 +256,13 @@ def main():
     print('\n===== B. 模拟用户：解包、加载镜像、初始化 =====')
     deploy = root / 'deploy'
     shutil.copytree(main_pkg, deploy)
+    # 隔离项目名写入演练副本的 compose 顶层 name:（文件级改动，免疫 sudo 环境清洗）
+    compose_file = deploy / 'docker-compose.yml'
+    replaced = re.sub(r'^name:[^\n]*$', f'name: {rehearsal_project}',
+                      compose_file.read_text(), count=1, flags=re.M)
+    check('隔离项目名已写入演练 compose 副本',
+          f'name: {rehearsal_project}' in replaced and replaced != compose_file.read_text())
+    compose_file.write_text(replaced)
     print('（解包副本的 SHA256 已随静态校验覆盖源包；副本直接用于演练）')
 
     result = docker('load', '-i', str(main_pkg / 'backend-image.tar.gz'))
@@ -384,9 +403,21 @@ def main():
         check('compose config --format json 可用', result.returncode == 0, result.stderr[-200:])
         project = json.loads(result.stdout)['name']
         vol = f'{project}_qq-ai-data'
-        created_volume = vol
+        check('演练使用独立 Compose 项目名', project.startswith('dafeiyu-rehearsal-'), project)
+        check('演练卷名不是固定生产卷名', vol != 'dafeiyu_qq-ai-data', vol)
         img_main = f'dafeiyu-backend:{main_tag}'
-        docker('volume', 'create', vol)
+        # C 段 compose up 已可能创建项目前缀的空卷；若存在，必须属于本次演练
+        pre = docker('volume', 'inspect', '--format',
+                     '{{index .Labels "com.docker.compose.project"}}', vol)
+        if pre.returncode == 0 and pre.stdout.strip() == rehearsal_project:
+            check('同名卷属本次演练项目（隔离生效）', True)
+        elif pre.returncode != 0:
+            check('演练卷不存在，由本段显式创建', True)
+            docker('volume', 'create', '--label', 'org.dafeiyu.rehearsal=true', vol)
+        else:
+            check('演练卷名未与外部卷冲突', False, pre.stdout[:120])
+            raise SystemExit('演练卷名与外部卷冲突，拒绝继续')
+        created_volume = vol
         # 模拟运行过的 NapCat：卷里有旧登录痕迹
         docker('run', '--rm', '-u', '0', '--entrypoint', 'sh', '-v', f'{vol}:/dest', img_main,
                '-c', 'echo old-login > /dest/old-login.txt')
@@ -398,6 +429,10 @@ def main():
             raise SystemExit('恢复演练的备份步骤失败')
         drill_backup = sorted((deploy / 'backups').glob('restore-drill-*'))[-1]
         check('备份包含登录卷 tar', (drill_backup / 'qq-ai-data.tar.gz').is_file())
+        check('备份目录权限 0700', octal_mode(drill_backup) == '700', octal_mode(drill_backup))
+        tar_modes = {p.name: octal_mode(p) for p in sorted(drill_backup.glob('*.tar.gz'))}
+        check('备份 tar 权限全部 0600（含 QQ 登录数据）',
+              bool(tar_modes) and set(tar_modes.values()) == {'600'}, str(tar_modes))
 
         docker(*compose_args, 'stop', 'backend', cwd=deploy)
         # 备份之后卷又发生了变化：恢复若不先快照，这份较新内容会直接丢失
@@ -412,10 +447,14 @@ def main():
         snapshots = sorted((deploy / 'backups').glob('pre-restore-*-qq-ai-data.tar.gz'))
         check('清空前登录卷已被快照到 backups/', bool(snapshots))
         if snapshots:
-            listing = docker('run', '--rm', '--entrypoint', 'tar',
+            check('登录卷快照权限 0600', octal_mode(snapshots[-1]) == '600', octal_mode(snapshots[-1]))
+            check('backups/ 目录权限 0700', octal_mode(deploy / 'backups') == '700',
+                  octal_mode(deploy / 'backups'))
+            # 快照是 0600，镜像默认用户是 10001 读不了，必须以 root 容器列出
+            listing = docker('run', '--rm', '-u', '0', '--entrypoint', 'tar',
                              '-v', f'{snapshots[-1].resolve()}:/snapshot:ro', img_main, 'tzf', '/snapshot')
             check('快照保留了恢复前的较新内容', 'newer-state.txt' in listing.stdout,
-                  listing.stdout[-200:])
+                  (listing.stderr[-200:] or listing.stdout[-200:]))
         listing = docker('run', '--rm', '--entrypoint', 'sh', '-v', f'{vol}:/dest:ro', img_main,
                          '-c', 'ls /dest')
         check('恢复后卷内容与备份一致',
@@ -427,8 +466,18 @@ def main():
               and intent_state(deploy).get('enabled') is False)
     finally:
         docker(*compose_args, 'down', '--remove-orphans', cwd=deploy, timeout=120)
-        if created_volume:
-            docker('volume', 'rm', '-f', created_volume)
+        # 只清理以本次演练随机项目名为前缀的卷；前缀含随机后缀，不可能撞上生产卷
+        rehearsal_volumes = [v for v in docker('volume', 'ls', '--format', '{{.Name}}').stdout.split()
+                             if v.startswith(rehearsal_project + '_')]
+        for v in rehearsal_volumes:
+            docker('volume', 'rm', '-f', v)
+        if created_volume and created_volume not in rehearsal_volumes:
+            mark = docker('volume', 'inspect', '--format',
+                          '{{index .Labels "org.dafeiyu.rehearsal"}}', created_volume).stdout.strip()
+            if mark == 'true':
+                docker('volume', 'rm', '-f', created_volume)
+            else:
+                print(f'警告：卷 {created_volume} 缺少演练标记，未自动删除，请人工确认')
         fixture.terminate()
         try:
             fixture.wait(timeout=10)
