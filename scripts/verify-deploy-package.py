@@ -67,6 +67,12 @@ def static_checks(pkg: pathlib.Path):
     # SHA256SUMS 全量校验
     result = run(['sha256sum', '--quiet', '-c', 'SHA256SUMS'], cwd=pkg)
     check(label + 'SHA256SUMS 全部通过', result.returncode == 0, result.stdout[-300:] + result.stderr[-300:])
+    # 清单必须覆盖包内全部文件：交付包里不允许有清单外的构建残留
+    actual = {'./' + str(p.relative_to(pkg)) for p in pkg.rglob('*')
+              if p.is_file() and p.name != 'SHA256SUMS'}
+    listed = {line.split(maxsplit=1)[1].strip().lstrip('*')
+              for line in (pkg / 'SHA256SUMS').read_text().splitlines() if line.strip()}
+    check(label + 'SHA256SUMS 覆盖包内全部文件', actual == listed, str(sorted(actual ^ listed))[:300])
 
     version = {}
     for line in (pkg / 'VERSION.txt').read_text().splitlines():

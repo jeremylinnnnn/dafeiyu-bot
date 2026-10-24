@@ -57,8 +57,10 @@ mkdir -p "$OUT/ops"
 cp "$REPO_ROOT"/deploy/cloud/ops/*.sh "$OUT/ops/"
 chmod +x "$OUT"/ops/*.sh "$OUT/qq-container-entrypoint.sh"
 
-# 首次启动前 data/ 必须存在且属主为 10001，解包后即带空目录
+# 首次启动前 data/ 必须存在且属主为 10001，解包后即带空目录。
+# 放占位文件：artifact 的 zip 不保留空目录，没文件这些目录会消失。
 mkdir -p "$OUT/data" "$OUT/config" "$OUT/backups"
+touch "$OUT/data/.gitkeep" "$OUT/config/.gitkeep" "$OUT/backups/.gitkeep"
 
 echo "== 生成版本清单 =="
 CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -85,12 +87,15 @@ CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 } > "$OUT/VERSION.txt"
 
 echo "== 生成 SHA256SUMS =="
+# 自检不得在清单生成后往包里写文件（上一版的 py_compile 就这样把
+# __pycache__ 带进了交付包，且不在 SHA256SUMS 里）。语法检查用 ast.parse。
+rm -rf "$OUT/__pycache__"
 ( cd "$OUT" && find . -type f ! -name SHA256SUMS -print0 \
     | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS )
 
 echo "== 包内自检 =="
 ( cd "$OUT" && for sh in ops/*.sh qq-container-entrypoint.sh; do bash -n "$sh"; done )
-python3 -m py_compile "$OUT/init-qq-config.py"
+python3 -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' "$OUT/init-qq-config.py"
 ( cd "$OUT" && "${DOCKER_CMD[@]}" compose -f docker-compose.yml config --quiet )
 # compose 引用的文件必须都在包内
 ( cd "$OUT" && for f in qq-container-entrypoint.sh docker-compose.credentials.yml; do
