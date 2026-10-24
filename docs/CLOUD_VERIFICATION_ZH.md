@@ -41,16 +41,21 @@ ARM64 最终发布镜像 `dafeiyu-backend:verified-a7a4fb3` 构建通过，架�
 - [原生 amd64 Linux 全量及发布/传输验证](https://github.com/jeremylinnnnn/dafeiyu-bot/actions/runs/39933231954)：通过（完整测试、Linux 图片边界、release 构建、HTTP 控制面板和合成 WebSocket 传输）。
 - [macOS CI](https://github.com/jeremylinnnnn/dafeiyu-bot/actions/runs/39933231967)：通过。
 
-## 部署包交付验收（2026-10-24）
+## 部署包交付验收（2026-10-24，正式交付版本 `912c389`）
 
-提交 `d1e1798` 的 [amd64 工作流](https://github.com/jeremylinnnnn/dafeiyu-bot/actions/runs/40062129867) 全绿：构建、平台确认、19 项容器验收、版本化打包、tar load 证明、包级演练（加载、升级保留 data/、暂停不被覆盖、回滚、恢复含登录卷快照）。本机 lima（arm64 演练包）同一脚本 A–F 全部通过。
+提交 `912c389` 的 [amd64 工作流](https://github.com/jeremylinnnnn/dafeiyu-bot/actions/runs/40066223287) 全绿：构建、平台确认、19 项容器验收、版本化打包、tar load 证明、包级演练（加载、升级保留 data/、暂停不被覆盖、回滚、恢复含登录卷快照）。本机 lima（arm64 演练包）同一脚本 A–F 全部通过，含资源隔离与权限断言。
 
-对**实际下载的 artifact** `dafeiyu-deploy-d1e1798ea3721409e403592588c1326b122a701f` 的验收：
+对**实际下载的 artifact** `dafeiyu-deploy-912c389a7382a87ba7320504e43ae09063b74192` 的验收：
 
 - `sha256sum -c SHA256SUMS`：17 项全部 OK；
-- `docker load -i backend-image.tar.gz`：成功（`Loaded image: dafeiyu-backend:d1e1798`）；
+- `docker load -i backend-image.tar.gz`：成功（`Loaded image: dafeiyu-backend:912c389`）；
 - 镜像平台确认 `linux/amd64`；
 - `data/ config/ backups/` 经占位文件 `keep` 保留（upload-artifact v4 默认丢弃隐藏文件与空目录），包内无清单外残留。
+
+第 18 轮补强的两项演练保证（本机 A–F 断言 + CI 同脚本）：
+
+- **资源隔离**：演练副本的 Compose 项目名改写为随机后缀（`dafeiyu-rehearsal-*`），登录卷名不再解析为固定的 `dafeiyu_qq-ai-data`；清理只删除属本次演练项目的卷（按项目标签/前缀判定），绝不触碰生产卷。
+- **备份权限**：备份目录 0700、含 QQ 登录数据的 tar 一律 0600（快照以 `umask 077` 创建，无 0644 窗口），演练中逐项断言。
 
 边界：以上全部为合成验证，不调用真实模型、不发送真实 QQ 消息；服务器上的真实部署与 T1–T4 尚未开始。
 
