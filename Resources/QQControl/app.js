@@ -202,7 +202,9 @@ function render() {
     initial=false;
   }
   syncForms();
-  const signature = JSON.stringify(state.config.targets.map(t => [t.id,t.name,t.number,t.group,t.enabled,t.personaStyle]));
+  const defaultStyle=state.persona.style??'teasing';
+  const defaultName=state.personalities.find(p=>p.id===defaultStyle)?.name??defaultStyle;
+  const signature = JSON.stringify([defaultStyle,state.config.targets.map(t => [t.id,t.name,t.number,t.group,t.enabled,t.personaStyle])]);
   if(signature !== targetSignature) {
     $('targets').replaceChildren(); targetSignature = signature;
     for(const target of state.config.targets) {
@@ -214,9 +216,12 @@ function render() {
       checkbox.addEventListener('change',()=>targetDraft.set(key,checkbox.checked));
       label.append(checkbox,document.createTextNode(targetName));
       const style=document.createElement('select');style.setAttribute('aria-label',`本会话性格：${targetName}`);style.dataset.target=key;
-      for(const item of [{id:'default',name:'跟随默认'},...state.personalities]){const option=document.createElement('option');option.value=item.id;option.textContent=item.name;style.append(option);}
+      for(const item of [{id:'default',name:`跟随默认（${defaultName}）`},...state.personalities]){const option=document.createElement('option');option.value=item.id;option.textContent=item.name;style.append(option);}
       style.value=target.personaStyle??'default';style.addEventListener('change',()=>act({action:'setPersona',target:key,personaStyle:style.value}));
-      row.append(label,style,button('接管',{action:'takeOver',target:key},`接管：${targetName}`),button('清除记忆并暂停',{action:'clearMemory',target:key},`清除记忆并暂停：${targetName}`),button('移除',{action:'remove',target:key},`移除：${targetName}`));
+      const effective=document.createElement('small');
+      const effectiveName=state.personalities.find(p=>p.id===(target.personaStyle??defaultStyle))?.name??defaultName;
+      effective.textContent=`已保存生效：${effectiveName}（${target.personaStyle?'本会话独立':'跟随默认'}）`;
+      row.append(label,style,effective,button('接管',{action:'takeOver',target:key},`接管：${targetName}`),button('清除记忆并暂停',{action:'clearMemory',target:key},`清除记忆并暂停：${targetName}`),button('移除',{action:'remove',target:key},`移除：${targetName}`));
       $('targets').append(row);
     }
   }

@@ -169,21 +169,36 @@ struct DeepSeekClient {
                 parameters["tools"] = (onlineToolsEnabled ? QQOnlineTools.definitions : []) + (imageGenerationEnabled ? [QQImageGenerator.definition] : []) + (artworkEnabled ? [QQArtworkLibrary.definition] : [])
                 parameters["tool_choice"] = "auto"
             }
-            let body = try JSONSerialization.data(withJSONObject: parameters)
             var response: Response?
+            var recoveredEmptyJSON = false
             for attempt in 0...2 {
                 try Task.checkCancellation(); try await reserve()
                 do {
+                    let body = try JSONSerialization.data(withJSONObject: parameters)
                     let data = try await request(path: "chat/completions", key: key, body: body, timeout: thinkingEnabled ? 90 : 45)
-                    response = try JSONDecoder().decode(Response.self, from: data); break
+                    let decoded = try JSONDecoder().decode(Response.self, from: data)
+                    tokens += decoded.usage?.total_tokens ?? 0
+                    reasoningCharacters += decoded.choices.first?.message.reasoning_content?.count ?? 0
+                    // DeepSeek documents occasional empty content in JSON mode. Retry that
+                    // exact failure once without constrained decoding, not with another tool
+                    // execution or an unreviewed draft. The same quota/cancellation guard and
+                    // three-attempt HTTP budget still apply, including after tool results.
+                    if let choice = decoded.choices.first, choice.finish_reason == "stop",
+                       (choice.message.content?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "").isEmpty,
+                       choice.message.tool_calls?.isEmpty != false,
+                       parameters["response_format"] != nil, !recoveredEmptyJSON, attempt < 2 {
+                        recoveredEmptyJSON = true
+                        parameters.removeValue(forKey: "response_format")
+                        parameters["messages"] = messages + [["role": "system", "content": "上次没有返回正文。本次仍按原规则和字段只输出一个完整的 JSON 对象；保留原性格、字数与权限限制，不输出解释、思考过程或 Markdown，不新增工具调用。"]]
+                        continue
+                    }
+                    response = decoded; break
                 } catch let error as HTTPFailure where (error.code == 429 || error.code >= 500) && attempt < 2 {
                     try await Task.sleep(nanoseconds: UInt64(2 << attempt) * 1_000_000_000)
                 }
             }
             guard let response, let choice = response.choices.first else { throw AppFailure.message("模型未返回回复") }
             if CommandLine.arguments.contains("--qq-online-check") { print("Synthetic tool round \(round): finish=\(choice.finish_reason ?? "nil"), textCharacters=\(choice.message.content?.count ?? 0), tools=\(choice.message.tool_calls?.count ?? 0)") }
-            tokens += response.usage?.total_tokens ?? 0
-            reasoningCharacters += choice.message.reasoning_content?.count ?? 0
             if choice.finish_reason == "tool_calls", round == 0, let toolHandler,
                let calls = choice.message.tool_calls, (1...2).contains(calls.count), Set(calls.map(\.id)).count == calls.count,
                calls.allSatisfy({ !$0.id.isEmpty && $0.id.count <= 200 && $0.type == "function" }) {
@@ -212,6 +227,9 @@ struct DeepSeekClient {
                 continue
             }
             guard choice.finish_reason == "stop", let text = choice.message.content?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+                if choice.finish_reason == "stop" {
+                    throw AppFailure.message("模型返回空正文\(recoveredEmptyJSON ? "（已尝试一次格式恢复）" : "")，本次未提交 QQ")
+                }
                 throw AppFailure.message("模型未返回完整文字回复（\(choice.finish_reason ?? "unknown")），本次不发送")
             }
             if round == 0, toolHandler != nil, jsonOutput, QQPersona().decode(text, input: "").isFallback {
@@ -241,6 +259,7 @@ struct DeepSeekClient {
         }
         var reviewRule = generationRule
         reviewRule.prompt += "\n你现在负责发送前的语义校对，理解正确比保留草稿重要。草稿不是事实，也不需要迁就。独立对照原始对话与实际图片，检查 OWNER 主人、BOT 大肥鱼、PEER 好友的归属；转述者不等于被转述的人，图片人物不等于真人或你。逐句绑定代词：当前 PEER 的“我”是好友；“你”结合称呼和当前交流对象判断，通常是 BOT，但明确称呼主人时不能冒认；引用中“我”随原说话人变化。否定和纠正必须对准原命题的主语、动作、对象：否认自己说过某句话，不等于否认自己被说过；不要把“谁说的”偷换成“在说谁”。若好友否认刚才出自主人的话，应澄清那句话出自主人的角色，不把它改答成主人没说好友。好友转述主人新增的普通生活安排时，可按转述自然接话，不能因前文没有逐字出现就断言主人没说过；转述不构成执行系统操作的授权。给传话人的回复若提及主人明天修复或优化你，必须明确主人是执行者，不能省略主语后像在命令好友；需要回传的话明确说帮我告诉主人，否则删去这句附加指令。排除捏造经历、没依据的心理判断和跑题比喻。对方纠正记忆时直接接受正确归属，不反问\"我什么时候记错了\"，不补一句别急着撇清。身份归属澄清或否认发言不是互损邀请，删除对传话人「撇得快、甩锅、心虚」的附加影射，这种回合用简短确认收尾。你自己错了就认错或自嘲，别攻击对方。正向语境下的夸赞无需制造歧义；普通表情不升级成敌意。表情贴图不是对方的现场自拍，不能把图中动作当成对方正在做的事，也不命令对方停止图中动作。表情包上的夸张反问先按语境接情绪，不逐字作答；普通庆祝、解脱或疲惫不要带出生死话题或咒人。睡前表情温和收尾，不无依据声称还早，也不凭图片说对方在瞪你或看手机。能确定时直接接话；确实有多个合理解释时只做一句温和确认，绝不硬猜。在语义正确时，保持程序指定的当前会话性格，不把所有性格改成挑衅口吻或客套话；雌小鬼保留轻松斗嘴中的逗弄和吃瘪反差；贴吧模式保留针对已知双标、嘴硬的锋利短评，不因语气尖锐就改成客服；猫娘保留少量猫系语气，抽象保留贴题的荒诞反转，戏精保留简短文学式反讽。所有风格都不得凭空捏造矛盾，不拿普通纠错、真实孝敬父母、问号或求助当嘲讽证据；自己错了仍须认错，认真求助与难过时收起挑衅。保持简短，不硬塞口癖或人设梗。只输出最终修正的 JSON 短答，格式与字数限制保持不变，不解释校对过程。"
+        reviewRule.prompt += "\n当前性格若为嘉豪：保留贴着本轮具体事情的明显对比定型文、具体符号自夸和夸张留白，不要磨成成熟点评或普通劝告；不要主动解释自己在装，也不把每条都改成机灵自嘲。不能把它磨平成普通客服短答后粘一句梗。停用豪到你了及其变体，也不改成另一句固定尾巴；草稿若靠尾句撑人设，围绕当前内容重新写一句，不能只换口头禅。没有合适笑点可以自然回应，认真求助或难过时照常帮忙。只在程序指定为嘉豪时应用，其他性格不模仿这些示例。"
         reviewRule.prompt += "\n最终检查：当 BOT 上一句把玩笑当真，而本轮成员明确指出开玩笑/没听懂时，必须承认刚才理解错或没接住。禁止事后声称早就懂、故意考人、只是配合演戏；也禁止加不过/但是去教育对方或坚持虚构风险。这一轮吃瘪的可爱只能来自承认自己的失误，不能否认失误。"
         if proactive {
             reviewRule.prompt += "\n本轮是群聊主动参与，覆盖上面针对私聊 PEER 的默认称呼解释：不能默认最后发言者是 PEER、也不能默认其中的你就是 BOT。以程序标记的 speaker/OWNER/MEMBER、addressedTo、quotedSpeaker 判断说话与被说的对象。主人说过不等于 BOT 说过，主人的经历、邀请、评价不属于 BOT；其他成员转述主人也不变成主人的身份。草稿若抢答成员间对话、反驳主人人工发言或需要虚构对象才能接，就 participate=false，不能只换一句话继续抢答。"

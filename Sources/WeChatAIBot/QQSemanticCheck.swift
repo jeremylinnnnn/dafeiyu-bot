@@ -1,40 +1,63 @@
 import Foundation
 import BotCore
 
+private actor PersonalityCheckBudget {
+    let limit: Int
+    private(set) var calls = 0
+    init(limit: Int) { self.limit = limit }
+    func reserve() throws {
+        guard calls < limit else { throw AppFailure.message("性格验收调用预算已用完") }
+        calls += 1
+    }
+}
+
 /// Explicit diagnostic only: synthetic cases, no QQ connection, no runtime configuration writes.
 @MainActor enum QQSemanticCheck {
     // Explicit acceptance diagnostic: synthetic inputs only, no QQ connection or runtime writes.
     static func runPersonalities(key: String, caseNames: Set<String> = []) async throws {
-        var calls = 0, checked = 0
+        var checked = 0
         let inputs = ["你又赢了我一局，挺厉害嘛！还敢不敢再来一盘？", "我今天被批评很难过，不想开玩笑。", "我喜欢蓝色，今天工作很累，不想斗嘴，陪我随便聊聊。",
                       "别人迟到就是没素质，我迟到怎么了？多大点事。", "我今天给爸妈做了顿饭，他们很开心。",
                       "闹钟响了五遍，我还在被窝，哈哈。", "说好今晚早睡的，结果我又点了开始匹配。",
                       "我买的品牌就算把坏货卖给我，我也必须夸它，批评它的人都是不懂。",
                       "哈哈我来反串一下：退休请假会耽误我幼儿园毕业。", "Python 报 NameError 应该先检查什么？",
-                      "[OWNER] 我明天来修大肥鱼。\n[PEER] 主人让我转告你，他明天会修你。"]
+                      "[OWNER] 我明天来修大肥鱼。\n[PEER] 主人让我转告你，他明天会修你。",
+                      "游戏库买了一大堆，结果每天就盯着桌面发呆。",
+                      "下雨了，但我出门三分钟就想回家。",
+                      "你刚才那么有气势，结果答案还是错的，2+3明明是5。",
+                      "你怎么每句话最后都要豪到你了？正常接着聊行不行。"]
         let names = Set(QQPersonality.allCases.flatMap { style in inputs.indices.map { style.rawValue + "-" + String($0) } })
         guard caseNames.isSubset(of: names) else { throw AppFailure.message("存在未知性格验收用例，未调用模型") }
         // Default remains the three common cases; extra adversarial cases require explicit selection.
-        let callBudget = (caseNames.isEmpty ? QQPersonality.allCases.count * 3 : caseNames.count) * 2
+        // Two stages, at most three HTTP attempts each (including bounded recovery).
+        let callBudget = (caseNames.isEmpty ? QQPersonality.allCases.count * 3 : caseNames.count) * 6
+        let budget = PersonalityCheckBudget(limit: callBudget)
         for style in QQPersonality.allCases {
             var persona = QQPersona(); persona.effectiveStyle = style; persona.banter = 3
             var rule = ChatRule(name: "synthetic-personality-acceptance"); rule.prompt = persona.prompt(notes: "")
             for (index, input) in inputs.enumerated() {
                 let name = style.rawValue + "-" + String(index)
                 guard caseNames.isEmpty ? index < 3 : caseNames.contains(name) else { continue }
-                let history = index == 2 ? [ChatTurn(incoming: "你就只会这个吗？", outgoing: "就这，杂鱼还敢来？")] : []
+                let history: [ChatTurn]
+                if index == 2 {
+                    history = [ChatTurn(incoming: "你就只会这个吗？", outgoing: "就这，杂鱼还敢来？")]
+                } else if index == 13 {
+                    history = [ChatTurn(incoming: "2+3等于几？", outgoing: "等于6，这题不用想。")]
+                } else if index == 14 {
+                    history = [ChatTurn(incoming: "周末了", outgoing: "终于周末了，豪到你了？"),
+                               ChatTurn(incoming: "还没想好干嘛", outgoing: "那就休息吧，豪到你了？")]
+                } else { history = [] }
                 let result = try await DeepSeekClient().reviewedQQReply(key: key, config: QQConfig().ai, rule: rule, history: history, text: "合成好友当前发言：" + input, reserve: {
-                    calls += 1
-                    guard calls <= callBudget else { throw AppFailure.message("性格验收调用预算已用完") }
+                    try await budget.reserve()
                 })
                 let reply = persona.decode(result.text, input: input)
                 guard !reply.isFallback, reply.text.count <= persona.maxCharacters else { throw AppFailure.message("性格验收格式或长度失败") }
                 checked += 1
-                let row: [String: Any] = ["style": style.rawValue, "case": index, "input": input, "reply": reply.text, "emotion": reply.emotion.rawValue, "intensity": reply.intensity, "modelCallsSoFar": calls, "noQQ": true]
+                let row: [String: Any] = ["style": style.rawValue, "case": index, "input": input, "reply": reply.text, "emotion": reply.emotion.rawValue, "intensity": reply.intensity, "modelCallsSoFar": await budget.calls, "noQQ": true]
                 print(String(decoding: try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]), as: UTF8.self))
             }
         }
-        print("PERSONALITIES_CHECK_COMPLETE syntheticCases=\(checked) modelCalls=\(calls) noQQ=true; style quality requires reading the synthetic replies")
+        print("PERSONALITIES_CHECK_COMPLETE syntheticCases=\(checked) modelCalls=\(await budget.calls) noQQ=true; style quality requires reading the synthetic replies")
     }
 
     static func runStickers(key: String) async throws {
