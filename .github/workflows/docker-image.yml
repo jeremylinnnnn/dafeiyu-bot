@@ -83,10 +83,11 @@ jobs:
           docker image inspect "$SHORT_TAG" --format '{{.Os}}/{{.Architecture}}'
 
       - name: Package-level rehearsal (load, upgrade keeps data, pause survives, rollback)
-        run: python3 scripts/verify-deploy-package.py \
-          --package /tmp/dafeiyu-deploy-pkg \
-          --upgrade-package /tmp/dafeiyu-deploy-pkg-next \
-          --workdir /tmp/dafeiyu-pkg-e2e
+        run: |
+          python3 scripts/verify-deploy-package.py \
+            --package /tmp/dafeiyu-deploy-pkg \
+            --upgrade-package /tmp/dafeiyu-deploy-pkg-next \
+            --workdir /tmp/dafeiyu-pkg-e2e
 
       - name: Upload the deployment bundle (7-day retention)
         if: success()
