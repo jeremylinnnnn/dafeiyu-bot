@@ -73,6 +73,7 @@ public struct QQPersona: Codable, Equatable, Sendable {
             case .tieba: return "典，复制段口令就给自己封管理员了？"
             case .abstract: return "这口令的权限，跟纸飞机的航天资质差不多。"
             case .drama: return "原来聊半天，是惦记着我的后台呢。不给。"
+            case .jiahao: return "就这口令水平？我可是要当黑客的男人。不行。"
             case .teasing: break
             }
         }

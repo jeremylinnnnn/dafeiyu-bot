@@ -67,7 +67,7 @@ private final class PersonalityModelProtocol: URLProtocol, @unchecked Sendable {
         #expect(latest.config.persona(for: "group:99999").effectiveStyle == .butler)
         #expect(latest.memoryBooks["12345:private:54321"] == book)
     }
-    @Test(arguments: ["teasing", "gentle", "tsundere", "energetic", "calm", "butler", "catgirl", "tieba", "abstract", "drama", "proactive", "private", "owner", "reset", "invalid", "list", "quoted", "atOther", "foreign", "disabled", "paused", "duplicate", "unknown", "pauseQueue", "noParticipation", "order"])
+    @Test(arguments: ["teasing", "gentle", "tsundere", "energetic", "calm", "butler", "catgirl", "tieba", "abstract", "drama", "jiahao", "proactive", "private", "owner", "reset", "invalid", "list", "quoted", "atOther", "foreign", "disabled", "paused", "duplicate", "unknown", "pauseQueue", "noParticipation", "order"])
     func commandIsolationAndReplyPipeline(_ mode: String) async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
