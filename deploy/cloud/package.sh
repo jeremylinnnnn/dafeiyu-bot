@@ -58,9 +58,10 @@ cp "$REPO_ROOT"/deploy/cloud/ops/*.sh "$OUT/ops/"
 chmod +x "$OUT"/ops/*.sh "$OUT/qq-container-entrypoint.sh"
 
 # 首次启动前 data/ 必须存在且属主为 10001，解包后即带空目录。
-# 放占位文件：artifact 的 zip 不保留空目录，没文件这些目录会消失。
+# 占位文件不能用点文件：upload-artifact v4 默认丢弃隐藏文件，.gitkeep
+# 根本到不了下载者手里（.keep 同理），所以用普通文件名 keep。
 mkdir -p "$OUT/data" "$OUT/config" "$OUT/backups"
-touch "$OUT/data/.gitkeep" "$OUT/config/.gitkeep" "$OUT/backups/.gitkeep"
+touch "$OUT/data/keep" "$OUT/config/keep" "$OUT/backups/keep"
 
 echo "== 生成版本清单 =="
 CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)

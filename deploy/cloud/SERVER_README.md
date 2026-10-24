@@ -13,6 +13,7 @@ docker load -i backend-image.tar.gz
 python3 init-qq-config.py --directory ./config
 
 # 3. 数据目录属主必须是容器用户 10001，否则 state.json 写不进去
+#    （目录里的 keep 是占位文件，留着或删掉都行）
 sudo chown -R 10001:10001 data
 
 # 4.（可选）文件凭证模式：两把都放 secrets/，0400 或 0600，属主 10001
