@@ -41,6 +41,19 @@ ARM64 最终发布镜像 `dafeiyu-backend:verified-a7a4fb3` 构建通过，架�
 - [原生 amd64 Linux 全量及发布/传输验证](https://github.com/jeremylinnnnn/dafeiyu-bot/actions/runs/39933231954)：通过（完整测试、Linux 图片边界、release 构建、HTTP 控制面板和合成 WebSocket 传输）。
 - [macOS CI](https://github.com/jeremylinnnnn/dafeiyu-bot/actions/runs/39933231967)：通过。
 
+## 部署包交付验收（2026-10-24）
+
+提交 `d1e1798` 的 [amd64 工作流](https://github.com/jeremylinnnnn/dafeiyu-bot/actions/runs/40062129867) 全绿：构建、平台确认、19 项容器验收、版本化打包、tar load 证明、包级演练（加载、升级保留 data/、暂停不被覆盖、回滚、恢复含登录卷快照）。本机 lima（arm64 演练包）同一脚本 A–F 全部通过。
+
+对**实际下载的 artifact** `dafeiyu-deploy-d1e1798ea3721409e403592588c1326b122a701f` 的验收：
+
+- `sha256sum -c SHA256SUMS`：17 项全部 OK；
+- `docker load -i backend-image.tar.gz`：成功（`Loaded image: dafeiyu-backend:d1e1798`）；
+- 镜像平台确认 `linux/amd64`；
+- `data/ config/ backups/` 经占位文件 `keep` 保留（upload-artifact v4 默认丢弃隐藏文件与空目录），包内无清单外残留。
+
+边界：以上全部为合成验证，不调用真实模型、不发送真实 QQ 消息；服务器上的真实部署与 T1–T4 尚未开始。
+
 ## 验证边界
 
 合成容器验证使用动态回环端口、独立标记目录、独立容器、假凭证和合成联系人。
